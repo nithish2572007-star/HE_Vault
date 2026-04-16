@@ -12,7 +12,6 @@
 using namespace std;
 using namespace seal;
 
-// --- Constants & File Paths ---
 const string PARAMS_FILE = "params.bin";
 const string PK_FILE = "public_key.bin";
 const string SK_ENC_FILE = "secret_key.enc";
@@ -24,7 +23,6 @@ const int TAG_LEN = 16;
 const int KEY_LEN = 32;
 const int PBKDF2_ITERS = 100000;
 
-// --- Cryptographic Wrapper for Key Gating (AES-256-GCM & PBKDF2) ---
 class CryptoManager {
 public:
     static void handleErrors() {
@@ -58,7 +56,6 @@ public:
         EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, TAG_LEN, tag);
         EVP_CIPHER_CTX_free(ctx);
 
-        // Package: [Salt(16)] [IV(12)] [Tag(16)] [Ciphertext...]
         string out(reinterpret_cast<char*>(salt), SALT_LEN);
         out.append(reinterpret_cast<char*>(iv), IV_LEN);
         out.append(reinterpret_cast<char*>(tag), TAG_LEN);
@@ -96,12 +93,11 @@ public:
             plaintext_len += len;
             return string(reinterpret_cast<char*>(plaintext.data()), plaintext_len);
         } else {
-            return ""; // Decryption failed (wrong password)
+            return ""; 
         }
     }
 };
 
-// --- FHE Vault Logic ---
 class Vault {
 private:
     shared_ptr<SEALContext> context_;
@@ -124,7 +120,6 @@ public:
 
         context_ = make_shared<SEALContext>(parms);
 
-        // Save parameters
         ofstream fs_params(PARAMS_FILE, ios::binary);
         parms.save(fs_params);
 
@@ -133,11 +128,9 @@ public:
         PublicKey public_key;
         keygen.create_public_key(public_key);
 
-        // Save PK
         ofstream fs_pk(PK_FILE, ios::binary);
         public_key.save(fs_pk);
 
-        // Serialize SK and wrap with AES
         stringstream sk_ss;
         secret_key.save(sk_ss);
         string enc_sk = CryptoManager::encryptSK(sk_ss.str(), password);
@@ -153,7 +146,6 @@ public:
         BatchEncoder batch_encoder(*context_);
         size_t slot_count = batch_encoder.slot_count();
 
-        // Encode string to polynomial slots
         vector<uint64_t> pod_matrix(slot_count, 0ULL);
         for(size_t i = 0; i < data.length() && i < slot_count; ++i) {
             pod_matrix[i] = static_cast<uint64_t>(data[i]);
@@ -161,12 +153,10 @@ public:
         Plaintext plain_data;
         batch_encoder.encode(pod_matrix, plain_data);
 
-        // Load PK
         ifstream fs_pk(PK_FILE, ios::binary);
         PublicKey public_key;
         public_key.load(*context_, fs_pk);
 
-        // Encrypt and Append to Storage
         Encryptor encryptor(*context_, public_key);
         Ciphertext encrypted_data;
         encryptor.encrypt(plain_data, encrypted_data);
@@ -180,7 +170,6 @@ public:
     void retrieve(const string& password) {
         loadContext();
 
-        // Decrypt the Secret Key
         ifstream fs_sk(SK_ENC_FILE, ios::binary | ios::ate);
         streamsize size = fs_sk.tellg();
         fs_sk.seekg(0, ios::beg);
@@ -249,7 +238,6 @@ public:
     }
 };
 
-// --- CLI Interface ---
 int main() {
     Vault vault;
     int choice;
