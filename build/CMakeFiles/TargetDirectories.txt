@@ -1,3 +1,3 @@
-/run/media/nithish/All Files/project/build/HE_Vault/build/CMakeFiles/he_vault.dir
-/run/media/nithish/All Files/project/build/HE_Vault/build/CMakeFiles/edit_cache.dir
-/run/media/nithish/All Files/project/build/HE_Vault/build/CMakeFiles/rebuild_cache.dir
+/run/media/nithish/All Files/project/HE_Vault/build/CMakeFiles/he_vault.dir
+/run/media/nithish/All Files/project/HE_Vault/build/CMakeFiles/edit_cache.dir
+/run/media/nithish/All Files/project/HE_Vault/build/CMakeFiles/rebuild_cache.dir

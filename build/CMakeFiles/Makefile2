@@ -54,10 +54,10 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = "/run/media/nithish/All Files/project/build/HE_Vault"
+CMAKE_SOURCE_DIR = "/run/media/nithish/All Files/project/HE_Vault"
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = "/run/media/nithish/All Files/project/build/HE_Vault/build"
+CMAKE_BINARY_DIR = "/run/media/nithish/All Files/project/HE_Vault/build"
 
 #=============================================================================
 # Directory level rules for the build root directory
@@ -85,14 +85,14 @@ clean: CMakeFiles/he_vault.dir/clean
 CMakeFiles/he_vault.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/he_vault.dir/build.make CMakeFiles/he_vault.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/he_vault.dir/build.make CMakeFiles/he_vault.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir="/run/media/nithish/All Files/project/build/HE_Vault/build/CMakeFiles" --progress-num=1,2 "Built target he_vault"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir="/run/media/nithish/All Files/project/HE_Vault/build/CMakeFiles" --progress-num=1,2 "Built target he_vault"
 .PHONY : CMakeFiles/he_vault.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/he_vault.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start "/run/media/nithish/All Files/project/build/HE_Vault/build/CMakeFiles" 2
+	$(CMAKE_COMMAND) -E cmake_progress_start "/run/media/nithish/All Files/project/HE_Vault/build/CMakeFiles" 2
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/he_vault.dir/all
-	$(CMAKE_COMMAND) -E cmake_progress_start "/run/media/nithish/All Files/project/build/HE_Vault/build/CMakeFiles" 0
+	$(CMAKE_COMMAND) -E cmake_progress_start "/run/media/nithish/All Files/project/HE_Vault/build/CMakeFiles" 0
 .PHONY : CMakeFiles/he_vault.dir/rule
 
 # Convenience name for target.
@@ -102,7 +102,7 @@ he_vault: CMakeFiles/he_vault.dir/rule
 # codegen rule for target.
 CMakeFiles/he_vault.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/he_vault.dir/build.make CMakeFiles/he_vault.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir="/run/media/nithish/All Files/project/build/HE_Vault/build/CMakeFiles" --progress-num=1,2 "Finished codegen for target he_vault"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir="/run/media/nithish/All Files/project/HE_Vault/build/CMakeFiles" --progress-num=1,2 "Finished codegen for target he_vault"
 .PHONY : CMakeFiles/he_vault.dir/codegen
 
 # clean rule for target.
