@@ -159,7 +159,6 @@ private:
         return raw_sk;
     }
 
-    // DRY Helper: Decrypts the whole file into a map for Read/Update/Delete operations
     map<string, string> loadAllAccounts(const string& password)
     {
         string raw_sk = getRawSecretKey(password);
@@ -213,8 +212,6 @@ private:
         return decrypted_accounts;
     }
 
-    // DRY Helper: Truncates and re-encrypts a map of accounts to disk
-    // Warning: Heavy FHE performance cost. Necessary evil for updating a binary stream without a DB engine.
     void rewriteVault(const map<string, string>& accounts)
     {
         ofstream fs_data(DATA_FILE, ios::binary | ios::trunc);
@@ -262,8 +259,6 @@ private:
 
     bool accountExists(const string& target_account, const string& password) 
     {
-        // For simple existence checks, loading the map is slightly overkill 
-        // but keeps the codebase clean and prevents duplicate logic.
         map<string, string> accounts = loadAllAccounts(password);
         return accounts.find(target_account) != accounts.end();
     }
@@ -391,16 +386,37 @@ public:
         }
     }
 
-    void updateAccount(const string& account_name, const string& new_credentials, const string& password) 
+    void updateAccount(const string& password) 
     {
         loadContext();
         map<string, string> accounts = loadAllAccounts(password);
+
+        if(accounts.empty()) 
+        {
+            cout << "[-] No formatted accounts found.\n";
+            return;
+        }
+
+        cout << "\n--- Available Accounts ---\n";
+        for(const auto& pair : accounts) 
+        {
+            cout << "- " << pair.first << "\n";
+        }
+        cout << "--------------------------\n";
+
+        cout << "Enter account name to update: ";
+        string account_name;
+        getline(cin, account_name);
 
         if(accounts.find(account_name) == accounts.end()) 
         {
             cout << "[-] Error: Account '" << account_name << "' not found.\n";
             return;
         }
+
+        cout << "Enter new credentials: ";
+        string new_credentials;
+        getline(cin, new_credentials);
 
         if(new_credentials.find('|') != string::npos) 
         {
@@ -409,15 +425,32 @@ public:
         }
 
         accounts[account_name] = new_credentials;
-        rewriteVault(accounts); // Re-encrypt everything
+        rewriteVault(accounts); 
         
         cout << "[+] Account '" << account_name << "' updated successfully.\n";
     }
 
-    void deleteAccount(const string& account_name, const string& password) 
+    void deleteAccount(const string& password) 
     {
         loadContext();
         map<string, string> accounts = loadAllAccounts(password);
+
+        if(accounts.empty()) 
+        {
+            cout << "[-] No formatted accounts found.\n";
+            return;
+        }
+
+        cout << "\n--- Available Accounts ---\n";
+        for(const auto& pair : accounts) 
+        {
+            cout << "- " << pair.first << "\n";
+        }
+        cout << "--------------------------\n";
+
+        cout << "Enter account name to delete: ";
+        string account_name;
+        getline(cin, account_name);
 
         if(accounts.find(account_name) == accounts.end()) 
         {
@@ -426,7 +459,7 @@ public:
         }
 
         accounts.erase(account_name);
-        rewriteVault(accounts); // Save the vault without the deleted account
+        rewriteVault(accounts); 
         
         cout << "[+] Account '" << account_name << "' deleted successfully.\n";
     }
@@ -519,21 +552,13 @@ int main()
         }
         else if(choice == 4) 
         {
-            string account_name, new_credentials, master_pw;
+            string master_pw;
             cout << "Enter master password: ";
             getline(cin, master_pw);
 
             try 
             {
-                vault.verifyPassword(master_pw);
-
-                cout << "Enter account name to update: ";
-                getline(cin, account_name);
-
-                cout << "Enter new credentials: ";
-                getline(cin, new_credentials);
-
-                vault.updateAccount(account_name, new_credentials, master_pw);
+                vault.updateAccount(master_pw);
             }
             catch(exception& e)
             {
@@ -542,18 +567,13 @@ int main()
         }
         else if(choice == 5) 
         {
-            string account_name, master_pw;
+            string master_pw;
             cout << "Enter master password: ";
             getline(cin, master_pw);
 
             try 
             {
-                vault.verifyPassword(master_pw);
-
-                cout << "Enter account name to delete: ";
-                getline(cin, account_name);
-
-                vault.deleteAccount(account_name, master_pw);
+                vault.deleteAccount(master_pw);
             }
             catch(exception& e)
             {
