@@ -137,15 +137,14 @@ private:
         context_ = make_shared<SEALContext>(parms);
     }
 
-    bool accountExists(const string& target_account, const string& password) 
+    string getRawSecretKey(const string& password)
     {
-        ifstream fs_data(DATA_FILE, ios::binary);
-        if(!fs_data.is_open() || fs_data.peek() == EOF) 
+        ifstream fs_sk(SK_ENC_FILE, ios::binary | ios::ate);
+        if(!fs_sk.is_open()) 
         {
-            return false; 
+            throw runtime_error("[-] Error: Vault does not exist. Run Setup first.");
         }
 
-        ifstream fs_sk(SK_ENC_FILE, ios::binary | ios::ate);
         streamsize size = fs_sk.tellg();
         fs_sk.seekg(0, ios::beg);
         
@@ -155,17 +154,30 @@ private:
         string raw_sk = CryptoManager::decryptSK(enc_sk_data, password);
         if(raw_sk.empty()) 
         {
-            throw runtime_error("[-] Error: Invalid master password.");
+            throw runtime_error("[-] Error: Incorrect password.");
         }
+        return raw_sk;
+    }
+
+    // DRY Helper: Decrypts the whole file into a map for Read/Update/Delete operations
+    map<string, string> loadAllAccounts(const string& password)
+    {
+        string raw_sk = getRawSecretKey(password);
 
         stringstream sk_ss(raw_sk);
         SecretKey secret_key;
         secret_key.load(*context_, sk_ss);
-        
+
         Decryptor decryptor(*context_, secret_key);
         BatchEncoder batch_encoder(*context_);
 
-        string search_prefix = target_account + "|";
+        ifstream fs_data(DATA_FILE, ios::binary);
+        map<string, string> decrypted_accounts;
+
+        if(!fs_data.is_open()) 
+        {
+            return decrypted_accounts;
+        }
 
         while(fs_data.peek() != EOF) 
         {
@@ -173,13 +185,13 @@ private:
             {
                 Ciphertext encrypted_data;
                 encrypted_data.load(*context_, fs_data);
-                
+
                 Plaintext plain_data;
                 decryptor.decrypt(encrypted_data, plain_data);
-                
+
                 vector<uint64_t> pod_matrix;
                 batch_encoder.decode(plain_data, pod_matrix);
-                
+
                 string decoded_str;
                 for(uint64_t val : pod_matrix) 
                 {
@@ -187,20 +199,82 @@ private:
                     decoded_str += static_cast<char>(val);
                 }
                 
-                if(decoded_str.find(search_prefix) == 0) 
+                size_t delim_pos = decoded_str.find('|');
+                if(delim_pos != string::npos) 
                 {
-                    return true; 
-                }
+                    decrypted_accounts[decoded_str.substr(0, delim_pos)] = decoded_str.substr(delim_pos + 1);
+                } 
             }
             catch(const exception& e) 
             {
                 break; 
             }
         }
-        return false;
+        return decrypted_accounts;
+    }
+
+    // DRY Helper: Truncates and re-encrypts a map of accounts to disk
+    // Warning: Heavy FHE performance cost. Necessary evil for updating a binary stream without a DB engine.
+    void rewriteVault(const map<string, string>& accounts)
+    {
+        ofstream fs_data(DATA_FILE, ios::binary | ios::trunc);
+        fs_data.close();
+
+        if(accounts.empty()) 
+        {
+            return;
+        }
+
+        ifstream fs_pk(PK_FILE, ios::binary);
+        PublicKey public_key;
+        public_key.load(*context_, fs_pk);
+
+        Encryptor encryptor(*context_, public_key);
+        BatchEncoder batch_encoder(*context_);
+        size_t slot_count = batch_encoder.slot_count();
+
+        fs_data.open(DATA_FILE, ios::binary | ios::app);
+
+        for(const auto& pair : accounts) 
+        {
+            string formatted_data = pair.first + "|" + pair.second;
+
+            if(formatted_data.length() > slot_count) 
+            {
+                throw runtime_error("[-] Error: Payload exceeds max vault slot size.");
+            }
+
+            vector<uint64_t> pod_matrix(slot_count, 0ULL);
+            for(size_t i = 0; i < formatted_data.length() && i < slot_count; ++i) 
+            {
+                pod_matrix[i] = static_cast<uint64_t>(formatted_data[i]);
+            }
+
+            Plaintext plain_data;
+            batch_encoder.encode(pod_matrix, plain_data);
+
+            Ciphertext encrypted_data;
+            encryptor.encrypt(plain_data, encrypted_data);
+
+            encrypted_data.save(fs_data);
+        }
+    }
+
+    bool accountExists(const string& target_account, const string& password) 
+    {
+        // For simple existence checks, loading the map is slightly overkill 
+        // but keeps the codebase clean and prevents duplicate logic.
+        map<string, string> accounts = loadAllAccounts(password);
+        return accounts.find(target_account) != accounts.end();
     }
 
 public:
+
+    void verifyPassword(const string& password)
+    {
+        getRawSecretKey(password); 
+    }
+
     void setup(const string& password) 
     {
         EncryptionParameters parms(scheme_type::bfv);
@@ -287,125 +361,79 @@ public:
     void retrieve(const string& password) 
     {
         loadContext();
+        map<string, string> decrypted_accounts = loadAllAccounts(password);
 
-        ifstream fs_sk(SK_ENC_FILE, ios::binary | ios::ate);
-        if(!fs_sk.is_open()) 
+        if(decrypted_accounts.empty()) 
         {
-            cout << "[-] Error: Vault does not exist. Run Setup first.\n";
+            cout << "[-] No formatted accounts found.\n";
             return;
         }
 
-        streamsize size = fs_sk.tellg();
-        fs_sk.seekg(0, ios::beg);
-        string enc_sk_data(size, '\0');
-        
-        if(fs_sk.read(&enc_sk_data[0], size)) 
+        cout << "\n--- Available Accounts ---\n";
+        for(const auto& pair : decrypted_accounts) 
         {
-            string raw_sk = CryptoManager::decryptSK(enc_sk_data, password);
-            if(raw_sk.empty()) 
-            {
-                cout << "[-] Error: Invalid master password.\n";
-                return;
-            }
-
-            stringstream sk_ss(raw_sk);
-            SecretKey secret_key;
-            secret_key.load(*context_, sk_ss);
-
-            Decryptor decryptor(*context_, secret_key);
-            BatchEncoder batch_encoder(*context_);
-
-            ifstream fs_data(DATA_FILE, ios::binary);
-            if(!fs_data.is_open()) 
-            {
-                cout << "[-] Vault is empty.\n";
-                return;
-            }
-
-            map<string, string> decrypted_accounts;
-
-            while(fs_data.peek() != EOF) 
-            {
-                try 
-                {
-                    Ciphertext encrypted_data;
-                    encrypted_data.load(*context_, fs_data);
-
-                    Plaintext plain_data;
-                    decryptor.decrypt(encrypted_data, plain_data);
-
-                    vector<uint64_t> pod_matrix;
-                    batch_encoder.decode(plain_data, pod_matrix);
-
-                    string decoded_str;
-                    for(uint64_t val : pod_matrix) 
-                    {
-                        if(val == 0) break;
-                        decoded_str += static_cast<char>(val);
-                    }
-                    
-                    size_t delim_pos = decoded_str.find('|');
-                    if(delim_pos != string::npos) 
-                    {
-                        decrypted_accounts[decoded_str.substr(0, delim_pos)] = decoded_str.substr(delim_pos + 1);
-                    } 
-                }
-                catch(const exception& e) 
-                {
-                    break; 
-                }
-            }
-
-            if(decrypted_accounts.empty()) 
-            {
-                cout << "[-] No formatted accounts found.\n";
-                return;
-            }
-
-            cout << "\n--- Available Accounts ---\n";
-            for(const auto& pair : decrypted_accounts) 
-            {
-                cout << "- " << pair.first << "\n";
-            }
-            cout << "--------------------------\n";
-
-            cout << "Enter the name of the account to retrieve its credentials: ";
-            string target_account;
-            getline(cin, target_account);
-
-            auto it = decrypted_accounts.find(target_account);
-            if(it != decrypted_accounts.end()) 
-            {
-                cout << "\n[+] Credentials for '" << target_account << "': " << it->second << "\n";
-            } 
-            else 
-            {
-                cout << "[-] Account '" << target_account << "' not found.\n";
-            }
+            cout << "- " << pair.first << "\n";
         }
+        cout << "--------------------------\n";
+
+        cout << "Enter the name of the account to retrieve its credentials: ";
+        string target_account;
+        getline(cin, target_account);
+
+        auto it = decrypted_accounts.find(target_account);
+        if(it != decrypted_accounts.end()) 
+        {
+            cout << "\n[+] Credentials for '" << target_account << "': " << it->second << "\n";
+        } 
+        else 
+        {
+            cout << "[-] Account '" << target_account << "' not found.\n";
+        }
+    }
+
+    void updateAccount(const string& account_name, const string& new_credentials, const string& password) 
+    {
+        loadContext();
+        map<string, string> accounts = loadAllAccounts(password);
+
+        if(accounts.find(account_name) == accounts.end()) 
+        {
+            cout << "[-] Error: Account '" << account_name << "' not found.\n";
+            return;
+        }
+
+        if(new_credentials.find('|') != string::npos) 
+        {
+            cout << "[-] Error: Credentials cannot contain the '|' character.\n";
+            return;
+        }
+
+        accounts[account_name] = new_credentials;
+        rewriteVault(accounts); // Re-encrypt everything
+        
+        cout << "[+] Account '" << account_name << "' updated successfully.\n";
+    }
+
+    void deleteAccount(const string& account_name, const string& password) 
+    {
+        loadContext();
+        map<string, string> accounts = loadAllAccounts(password);
+
+        if(accounts.find(account_name) == accounts.end()) 
+        {
+            cout << "[-] Error: Account '" << account_name << "' not found.\n";
+            return;
+        }
+
+        accounts.erase(account_name);
+        rewriteVault(accounts); // Save the vault without the deleted account
+        
+        cout << "[+] Account '" << account_name << "' deleted successfully.\n";
     }
 
     void changePassword(const string& old_pw, const string& new_pw) 
     {
-        ifstream fs_sk(SK_ENC_FILE, ios::binary | ios::ate);
-        if(!fs_sk.is_open()) 
-        {
-            cout << "[-] Error: Vault does not exist.\n";
-            return;
-        }
-
-        streamsize size = fs_sk.tellg();
-        fs_sk.seekg(0, ios::beg);
-        string enc_sk_data(size, '\0');
-        fs_sk.read(&enc_sk_data[0], size);
-        fs_sk.close();
-
-        string raw_sk = CryptoManager::decryptSK(enc_sk_data, old_pw);
-        if(raw_sk.empty()) 
-        {
-            cout << "[-] Error: Incorrect current password.\n";
-            return;
-        }
+        string raw_sk = getRawSecretKey(old_pw);
 
         string new_enc_sk = CryptoManager::encryptSK(raw_sk, new_pw);
         ofstream out_sk(SK_ENC_FILE, ios::binary | ios::trunc);
@@ -428,8 +456,10 @@ int main()
         cout << "  1. Setup / Factory Reset\n";
         cout << "  2. Add Account\n";
         cout << "  3. Retrieve Credentials\n";
-        cout << "  4. Change Master Password\n";
-        cout << "  5. Exit\n";
+        cout << "  4. Update Account\n";
+        cout << "  5. Delete Account\n";
+        cout << "  6. Change Master Password\n";
+        cout << "  7. Exit\n";
         cout << "==============================\n";
         cout << "> ";
         
@@ -455,14 +485,16 @@ int main()
             cout << "Enter master password: ";
             getline(cin, master_pw);
             
-            cout << "Enter account name: ";
-            getline(cin, account_name);
-            
-            cout << "Enter credentials to store: ";
-            getline(cin, credentials);
-            
             try 
             { 
+                vault.verifyPassword(master_pw);
+                
+                cout << "Enter account name: ";
+                getline(cin, account_name);
+                
+                cout << "Enter credentials to store: ";
+                getline(cin, credentials);
+                
                 vault.store(account_name, credentials, master_pw); 
             } 
             catch(exception& e) 
@@ -487,14 +519,60 @@ int main()
         }
         else if(choice == 4) 
         {
+            string account_name, new_credentials, master_pw;
+            cout << "Enter master password: ";
+            getline(cin, master_pw);
+
+            try 
+            {
+                vault.verifyPassword(master_pw);
+
+                cout << "Enter account name to update: ";
+                getline(cin, account_name);
+
+                cout << "Enter new credentials: ";
+                getline(cin, new_credentials);
+
+                vault.updateAccount(account_name, new_credentials, master_pw);
+            }
+            catch(exception& e)
+            {
+                cout << e.what() << "\n";
+            }
+        }
+        else if(choice == 5) 
+        {
+            string account_name, master_pw;
+            cout << "Enter master password: ";
+            getline(cin, master_pw);
+
+            try 
+            {
+                vault.verifyPassword(master_pw);
+
+                cout << "Enter account name to delete: ";
+                getline(cin, account_name);
+
+                vault.deleteAccount(account_name, master_pw);
+            }
+            catch(exception& e)
+            {
+                cout << e.what() << "\n";
+            }
+        }
+        else if(choice == 6) 
+        {
             string old_pw, new_pw;
             cout << "Enter current password: ";
             getline(cin, old_pw);
-            cout << "Enter new password: ";
-            getline(cin, new_pw);
             
             try 
             { 
+                vault.verifyPassword(old_pw);
+
+                cout << "Enter new password: ";
+                getline(cin, new_pw);
+                
                 vault.changePassword(old_pw, new_pw); 
             }
             catch(exception& e) 
@@ -502,7 +580,7 @@ int main()
                 cout << e.what() << "\n"; 
             }
         }
-        else if(choice == 5) 
+        else if(choice == 7) 
         {
             break;
         }
