@@ -316,8 +316,24 @@ public:
 
         if(accountExists(account_name, password)) 
         {
-            cout << "[-] Request Rejected: An account with the name '" << account_name << "' already exists.\n";
-            return;
+            cout << "[-] An account with the name '" << account_name << "' already exists.\n";
+            cout << "Would you like to update it with these new credentials? (y/n): ";
+            string response;
+            getline(cin, response);
+            
+            if(response == "y" || response == "Y") 
+            {
+                map<string, string> accounts = loadAllAccounts(password);
+                accounts[account_name] = credentials;
+                rewriteVault(accounts);
+                cout << "[+] Account '" << account_name << "' updated successfully.\n";
+                return;
+            }
+            else 
+            {
+                cout << "[-] Add operation cancelled.\n";
+                return;
+            }
         }
 
         string formatted_data = account_name + "|" + credentials;
@@ -558,6 +574,7 @@ int main()
 
             try 
             {
+                vault.verifyPassword(master_pw);
                 vault.updateAccount(master_pw);
             }
             catch(exception& e)
@@ -573,6 +590,7 @@ int main()
 
             try 
             {
+                vault.verifyPassword(master_pw);
                 vault.deleteAccount(master_pw);
             }
             catch(exception& e)
