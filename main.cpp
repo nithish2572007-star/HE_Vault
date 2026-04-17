@@ -21,14 +21,12 @@ const string PK_FILE = "public_key.bin";
 const string SK_ENC_FILE = "secret_key.enc";
 const string DATA_FILE = "data_store.bin";
 
-// AES/PBKDF2 constants
 const int SALT_LEN = 16;
 const int IV_LEN = 12;
 const int TAG_LEN = 16;
 const int KEY_LEN = 32;
-const int PBKDF2_ITERS = 100000; // Bump this if running on faster hardware
+const int PBKDF2_ITERS = 100000;
 
-// Handles the AES-256-GCM wrapping so the HE secret key isn't sitting in plaintext
 class CryptoManager 
 {
 public:
@@ -46,37 +44,34 @@ public:
         }
     }
 
-    static string encryptSK(const string& pt_sk, const string& password) 
+    static string encryptSK(const string& plaintext_sk, const string& password) 
     {
         unsigned char salt[SALT_LEN], iv[IV_LEN], key[KEY_LEN], tag[TAG_LEN];
         
-        // Generate random salt and IV
         RAND_bytes(salt, SALT_LEN);
         RAND_bytes(iv, IV_LEN);
         deriveKey(password, salt, key);
 
         EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
         int len;
-        int ct_len;
-        vector<unsigned char> ciphertext(pt_sk.length() + EVP_MAX_BLOCK_LENGTH);
+        int ciphertext_len;
+        vector<unsigned char> ciphertext(plaintext_sk.length() + EVP_MAX_BLOCK_LENGTH);
 
         EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL);
         EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv);
-        EVP_EncryptUpdate(ctx, ciphertext.data(), &len, (const unsigned char*)pt_sk.data(), pt_sk.length());
-        ct_len = len;
+        EVP_EncryptUpdate(ctx, ciphertext.data(), &len, (const unsigned char*)plaintext_sk.data(), plaintext_sk.length());
+        ciphertext_len = len;
         
         EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len);
-        ct_len += len;
+        ciphertext_len += len;
         
-        // Get the GCM auth tag
         EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, TAG_LEN, tag);
         EVP_CIPHER_CTX_free(ctx);
 
-        // Pack it all up: [Salt][IV][Tag][Ciphertext]
         string out(reinterpret_cast<char*>(salt), SALT_LEN);
         out.append(reinterpret_cast<char*>(iv), IV_LEN);
         out.append(reinterpret_cast<char*>(tag), TAG_LEN);
-        out.append(reinterpret_cast<char*>(ciphertext.data()), ct_len);
+        out.append(reinterpret_cast<char*>(ciphertext.data()), ciphertext_len);
         
         return out;
     }
@@ -85,7 +80,7 @@ public:
     {
         if(packaged_data.length() < SALT_LEN + IV_LEN + TAG_LEN) 
         {
-            return ""; // Data is corrupted or too short
+            return ""; 
         }
 
         unsigned char salt[SALT_LEN], iv[IV_LEN], tag[TAG_LEN], key[KEY_LEN];
@@ -96,17 +91,17 @@ public:
         deriveKey(password, salt, key);
 
         const unsigned char* ciphertext = (const unsigned char*)(packaged_data.data() + SALT_LEN + IV_LEN + TAG_LEN);
-        int ct_len = packaged_data.length() - (SALT_LEN + IV_LEN + TAG_LEN);
+        int ciphertext_len = packaged_data.length() - (SALT_LEN + IV_LEN + TAG_LEN);
 
         EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
         int len;
-        int pt_len;
-        vector<unsigned char> plaintext(ct_len);
+        int plaintext_len;
+        vector<unsigned char> plaintext(ciphertext_len);
 
         EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL);
         EVP_DecryptInit_ex(ctx, NULL, NULL, key, iv);
-        EVP_DecryptUpdate(ctx, plaintext.data(), &len, ciphertext, ct_len);
-        pt_len = len;
+        EVP_DecryptUpdate(ctx, plaintext.data(), &len, ciphertext, ciphertext_len);
+        plaintext_len = len;
         
         EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, TAG_LEN, tag);
 
@@ -115,12 +110,12 @@ public:
 
         if(ret > 0) 
         {
-            pt_len += len;
-            return string(reinterpret_cast<char*>(plaintext.data()), pt_len);
+            plaintext_len += len;
+            return string(reinterpret_cast<char*>(plaintext.data()), plaintext_len);
         } 
         else 
         {
-            return ""; // Auth tag failed (wrong password)
+            return ""; 
         }
     }
 };
@@ -135,14 +130,14 @@ private:
         ifstream fs(PARAMS_FILE, ios::binary);
         if(!fs.is_open()) 
         {
-            throw runtime_error("Error: Vault not initialized. Run setup first.");
+            throw runtime_error("[-] Error: Run setup first.");
         }
         EncryptionParameters parms;
         parms.load(fs);
         context_ = make_shared<SEALContext>(parms);
     }
 
-    bool accountExists(const string& target_acc, const string& master_pass) 
+    bool accountExists(const string& target_account, const string& password) 
     {
         ifstream fs_data(DATA_FILE, ios::binary);
         if(!fs_data.is_open() || fs_data.peek() == EOF) 
@@ -157,10 +152,10 @@ private:
         string enc_sk_data(size, '\0');
         fs_sk.read(&enc_sk_data[0], size);
         
-        string raw_sk = CryptoManager::decryptSK(enc_sk_data, master_pass);
+        string raw_sk = CryptoManager::decryptSK(enc_sk_data, password);
         if(raw_sk.empty()) 
         {
-            throw runtime_error("Auth failed. Incorrect master password.");
+            throw runtime_error("[-] Error: Invalid master password.");
         }
 
         stringstream sk_ss(raw_sk);
@@ -170,41 +165,44 @@ private:
         Decryptor decryptor(*context_, secret_key);
         BatchEncoder batch_encoder(*context_);
 
-        string search_prefix = target_acc + "|";
+        string search_prefix = target_account + "|";
 
-        // TODO: This is an O(n) linear scan. Gets slow with a lot of accounts.
-        // Need to refactor data_store.bin into a proper Binary Search Tree structure later.
         while(fs_data.peek() != EOF) 
         {
-            Ciphertext encrypted_data;
-            encrypted_data.load(*context_, fs_data);
-            
-            Plaintext plain_data;
-            decryptor.decrypt(encrypted_data, plain_data);
-            
-            vector<uint64_t> pod_matrix;
-            batch_encoder.decode(plain_data, pod_matrix);
-            
-            string decoded_str;
-            for(uint64_t val : pod_matrix) 
+            try 
             {
-                if(val == 0) break;
-                decoded_str += static_cast<char>(val);
+                Ciphertext encrypted_data;
+                encrypted_data.load(*context_, fs_data);
+                
+                Plaintext plain_data;
+                decryptor.decrypt(encrypted_data, plain_data);
+                
+                vector<uint64_t> pod_matrix;
+                batch_encoder.decode(plain_data, pod_matrix);
+                
+                string decoded_str;
+                for(uint64_t val : pod_matrix) 
+                {
+                    if(val == 0) break;
+                    decoded_str += static_cast<char>(val);
+                }
+                
+                if(decoded_str.find(search_prefix) == 0) 
+                {
+                    return true; 
+                }
             }
-            
-            if(decoded_str.find(search_prefix) == 0) 
+            catch(const exception& e) 
             {
-                return true; 
+                break; 
             }
         }
         return false;
     }
 
 public:
-    void setup(const string& master_pass) 
+    void setup(const string& password) 
     {
-        cout << "[*] Generating SEAL context (poly_modulus_degree = 4096)...\n";
-        
         EncryptionParameters parms(scheme_type::bfv);
         size_t poly_modulus_degree = 4096;
         parms.set_poly_modulus_degree(poly_modulus_degree);
@@ -213,8 +211,6 @@ public:
 
         context_ = make_shared<SEALContext>(parms);
 
-        // Crucial: Truncate the file to prevent orphaned ciphertexts.
-        // If we don't do this, old data becomes permanently undecryptable junk.
         ofstream fs_data(DATA_FILE, ios::binary | ios::trunc);
         fs_data.close();
 
@@ -232,29 +228,39 @@ public:
         stringstream sk_ss;
         secret_key.save(sk_ss);
         
-        string enc_sk = CryptoManager::encryptSK(sk_ss.str(), master_pass);
+        string enc_sk = CryptoManager::encryptSK(sk_ss.str(), password);
         ofstream fs_sk(SK_ENC_FILE, ios::binary);
         fs_sk.write(enc_sk.data(), enc_sk.length());
 
-        cout << "[+] Setup complete. Previous vault data erased.\n";
+        cout << "[+] Setup complete. Vault reset and new keys generated.\n";
     }
 
-    void store(const string& target_acc, const string& creds, const string& master_pass) 
+    void store(const string& account_name, const string& credentials, const string& password) 
     {
         loadContext();
         
-        cout << "[*] Checking for duplicates...\n";
-        if(accountExists(target_acc, master_pass)) 
+        if(account_name.find('|') != string::npos) 
         {
-            cout << "[-] Rejected: Account '" << target_acc << "' already exists.\n";
+            cout << "[-] Error: Account names cannot contain the '|' character.\n";
             return;
         }
 
-        string formatted_data = target_acc + "|" + creds;
+        if(accountExists(account_name, password)) 
+        {
+            cout << "[-] Request Rejected: An account with the name '" << account_name << "' already exists.\n";
+            return;
+        }
+
+        string formatted_data = account_name + "|" + credentials;
 
         BatchEncoder batch_encoder(*context_);
         size_t slot_count = batch_encoder.slot_count();
         
+        if(formatted_data.length() > slot_count) 
+        {
+            throw runtime_error("[-] Error: Payload exceeds max vault slot size.");
+        }
+
         vector<uint64_t> pod_matrix(slot_count, 0ULL);
         for(size_t i = 0; i < formatted_data.length() && i < slot_count; ++i) 
         {
@@ -272,32 +278,36 @@ public:
         Ciphertext encrypted_data;
         encryptor.encrypt(plain_data, encrypted_data);
 
-        // Append raw ciphertext to disk
         ofstream fs_data(DATA_FILE, ios::binary | ios::app);
         encrypted_data.save(fs_data);
         
-        cout << "[+] Saved.\n";
+        cout << "[+] Account stored successfully.\n";
     }
 
-    void retrieve(const string& master_pass) 
+    void retrieve(const string& password) 
     {
         loadContext();
 
         ifstream fs_sk(SK_ENC_FILE, ios::binary | ios::ate);
+        if(!fs_sk.is_open()) 
+        {
+            cout << "[-] Error: Vault does not exist. Run Setup first.\n";
+            return;
+        }
+
         streamsize size = fs_sk.tellg();
         fs_sk.seekg(0, ios::beg);
         string enc_sk_data(size, '\0');
         
         if(fs_sk.read(&enc_sk_data[0], size)) 
         {
-            string raw_sk = CryptoManager::decryptSK(enc_sk_data, master_pass);
+            string raw_sk = CryptoManager::decryptSK(enc_sk_data, password);
             if(raw_sk.empty()) 
             {
-                cout << "[-] Auth failed. Wrong password.\n";
+                cout << "[-] Error: Invalid master password.\n";
                 return;
             }
 
-            cout << "[*] Decrypting vault...\n";
             stringstream sk_ss(raw_sk);
             SecretKey secret_key;
             secret_key.load(*context_, sk_ss);
@@ -312,100 +322,98 @@ public:
                 return;
             }
 
-            map<string, string> acc_map;
+            map<string, string> decrypted_accounts;
 
             while(fs_data.peek() != EOF) 
             {
-                Ciphertext encrypted_data;
-                encrypted_data.load(*context_, fs_data);
-
-                Plaintext plain_data;
-                decryptor.decrypt(encrypted_data, plain_data);
-
-                vector<uint64_t> pod_matrix;
-                batch_encoder.decode(plain_data, pod_matrix);
-
-                string decoded_str;
-                for(uint64_t val : pod_matrix) 
+                try 
                 {
-                    if(val == 0) break;
-                    decoded_str += static_cast<char>(val);
+                    Ciphertext encrypted_data;
+                    encrypted_data.load(*context_, fs_data);
+
+                    Plaintext plain_data;
+                    decryptor.decrypt(encrypted_data, plain_data);
+
+                    vector<uint64_t> pod_matrix;
+                    batch_encoder.decode(plain_data, pod_matrix);
+
+                    string decoded_str;
+                    for(uint64_t val : pod_matrix) 
+                    {
+                        if(val == 0) break;
+                        decoded_str += static_cast<char>(val);
+                    }
+                    
+                    size_t delim_pos = decoded_str.find('|');
+                    if(delim_pos != string::npos) 
+                    {
+                        decrypted_accounts[decoded_str.substr(0, delim_pos)] = decoded_str.substr(delim_pos + 1);
+                    } 
                 }
-                
-                size_t delim_pos = decoded_str.find('|');
-                if(delim_pos != string::npos) 
+                catch(const exception& e) 
                 {
-                    acc_map[decoded_str.substr(0, delim_pos)] = decoded_str.substr(delim_pos + 1);
-                } 
+                    break; 
+                }
             }
 
-            if(acc_map.empty()) 
+            if(decrypted_accounts.empty()) 
             {
-                cout << "[-] No formatted accounts found in data store.\n";
+                cout << "[-] No formatted accounts found.\n";
                 return;
             }
 
-            cout << "\n--- Accounts ---\n";
-            for(const auto& pair : acc_map) 
+            cout << "\n--- Available Accounts ---\n";
+            for(const auto& pair : decrypted_accounts) 
             {
-                cout << " > " << pair.first << "\n";
+                cout << "- " << pair.first << "\n";
             }
-            cout << "----------------\n\n";
+            cout << "--------------------------\n";
 
-            cout << "Enter account name to fetch creds: ";
-            string target_acc;
-            cin.ignore(); 
-            getline(cin, target_acc);
+            cout << "Enter the name of the account to retrieve its credentials: ";
+            string target_account;
+            getline(cin, target_account);
 
-            auto it = acc_map.find(target_acc);
-            if(it != acc_map.end()) 
+            auto it = decrypted_accounts.find(target_account);
+            if(it != decrypted_accounts.end()) 
             {
-                cout << "\n[+] " << target_acc << " -> " << it->second << "\n";
+                cout << "\n[+] Credentials for '" << target_account << "': " << it->second << "\n";
             } 
             else 
             {
-                cout << "[-] Account not found.\n";
+                cout << "[-] Account '" << target_account << "' not found.\n";
             }
         }
     }
 
-    void changePassword(const string& old_pass, const string& new_pass) 
+    void changePassword(const string& old_pw, const string& new_pw) 
     {
         ifstream fs_sk(SK_ENC_FILE, ios::binary | ios::ate);
+        if(!fs_sk.is_open()) 
+        {
+            cout << "[-] Error: Vault does not exist.\n";
+            return;
+        }
+
         streamsize size = fs_sk.tellg();
         fs_sk.seekg(0, ios::beg);
         string enc_sk_data(size, '\0');
         fs_sk.read(&enc_sk_data[0], size);
         fs_sk.close();
 
-        string raw_sk = CryptoManager::decryptSK(enc_sk_data, old_pass);
+        string raw_sk = CryptoManager::decryptSK(enc_sk_data, old_pw);
         if(raw_sk.empty()) 
         {
-            cout << "[-] Auth failed. Wrong current password.\n";
+            cout << "[-] Error: Incorrect current password.\n";
             return;
         }
 
-        string new_enc_sk = CryptoManager::encryptSK(raw_sk, new_pass);
+        string new_enc_sk = CryptoManager::encryptSK(raw_sk, new_pw);
         ofstream out_sk(SK_ENC_FILE, ios::binary | ios::trunc);
         out_sk.write(new_enc_sk.data(), new_enc_sk.length());
 
-        cout << "[+] Master password updated. Data payload untouched.\n";
+        cout << "[+] Password updated successfully.\n";
     }
 };
-
-void printMenu() 
-{
-    cout << "\n==============================\n";
-    cout << "       SovereignVault CLI     \n";
-    cout << "==============================\n";
-    cout << " 1. Setup / Factory Reset\n";
-    cout << " 2. Add Account\n";
-    cout << " 3. Retrieve Credentials\n";
-    cout << " 4. Change Master Password\n";
-    cout << " 5. Exit\n";
-    cout << "==============================\n";
-    cout << "> ";
-}
 
 int main() 
 {
@@ -414,40 +422,48 @@ int main()
 
     while(true) 
     {
-        printMenu();
+        cout << "\n==============================\n";
+        cout << "      SovereignVault CLI      \n";
+        cout << "==============================\n";
+        cout << "  1. Setup / Factory Reset\n";
+        cout << "  2. Add Account\n";
+        cout << "  3. Retrieve Credentials\n";
+        cout << "  4. Change Master Password\n";
+        cout << "  5. Exit\n";
+        cout << "==============================\n";
+        cout << "> ";
         
-        // Handle non-integer inputs gracefully so we don't infinite loop
         if(!(cin >> choice)) 
         {
             cin.clear();
             cin.ignore(10000, '\n');
-            cout << "[-] Invalid input.\n";
             continue;
         }
+        
+        cin.ignore(10000, '\n');
 
         if(choice == 1) 
         {
-            string pass;
-            cout << "Enter new master pass: ";
-            cin >> pass;
-            vault.setup(pass);
+            string pw;
+            cout << "Enter new master password: ";
+            getline(cin, pw);
+            vault.setup(pw);
         }
         else if(choice == 2) 
         {
-            string target_acc, creds, master_pass;
-            cout << "Enter master pass (to unlock & check for dupes): ";
-            cin >> master_pass;
+            string account_name, credentials, master_pw;
+            cout << "Enter master password: ";
+            getline(cin, master_pw);
             
-            cout << "Account name : ";
-            cin.ignore();
-            getline(cin, target_acc);
+            cout << "Enter account name: ";
+            getline(cin, account_name);
             
-            cout << "Credentials: ";
-            getline(cin, creds);
+            cout << "Enter credentials to store: ";
+            getline(cin, credentials);
             
             try 
             { 
-                vault.store(target_acc, creds, master_pass); 
+                vault.store(account_name, credentials, master_pw); 
             } 
             catch(exception& e) 
             { 
@@ -456,13 +472,13 @@ int main()
         }
         else if(choice == 3) 
         {
-            string pass;
-            cout << "Enter master pass: ";
-            cin >> pass;
+            string pw;
+            cout << "Enter master password: ";
+            getline(cin, pw);
             
             try 
             { 
-                vault.retrieve(pass); 
+                vault.retrieve(pw); 
             }
             catch(exception& e) 
             { 
@@ -471,15 +487,15 @@ int main()
         }
         else if(choice == 4) 
         {
-            string old_pass, new_pass;
-            cout << "Current pass: ";
-            cin >> old_pass;
-            cout << "New pass: ";
-            cin >> new_pass;
+            string old_pw, new_pw;
+            cout << "Enter current password: ";
+            getline(cin, old_pw);
+            cout << "Enter new password: ";
+            getline(cin, new_pw);
             
             try 
             { 
-                vault.changePassword(old_pass, new_pass); 
+                vault.changePassword(old_pw, new_pw); 
             }
             catch(exception& e) 
             { 
@@ -489,10 +505,6 @@ int main()
         else if(choice == 5) 
         {
             break;
-        }
-        else 
-        {
-            cout << "[-] Invalid choice.\n";
         }
     }
     return 0;
