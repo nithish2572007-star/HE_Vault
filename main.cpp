@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <limits>
 #include <map>
 
 // Crypto headers
@@ -27,19 +28,25 @@ const int TAG_LEN       = 16;
 const int KEY_LEN       = 32;
 const int PBKDF2_ITERS  = 100000;
 
-// ---------------------------------------------------------------------------
-// FIX (Medium): RAII wrapper so EVP_CIPHER_CTX is always freed, even if an
-// exception propagates out of the crypto functions in a future refactor.
-// ---------------------------------------------------------------------------
+// RAII wrapper so EVP_CIPHER_CTX is always freed, even if an exception
+// propagates out of the crypto functions.
 struct CtxGuard
 {
     EVP_CIPHER_CTX* ctx;
     explicit CtxGuard() : ctx(EVP_CIPHER_CTX_new()) {}
     ~CtxGuard() { if (ctx) EVP_CIPHER_CTX_free(ctx); }
-    // Non-copyable
     CtxGuard(const CtxGuard&) = delete;
     CtxGuard& operator=(const CtxGuard&) = delete;
 };
+
+// FIX (Low): helper to securely erase sensitive string data from heap memory
+// before it goes out of scope.  std::string destructor is not guaranteed to
+// zero memory in optimised builds.
+static void secureErase(string& s)
+{
+    if (!s.empty())
+        OPENSSL_cleanse(&s[0], s.size());
+}
 
 class CryptoManager
 {
@@ -64,11 +71,13 @@ public:
     {
         unsigned char salt[SALT_LEN], iv[IV_LEN], key[KEY_LEN], tag[TAG_LEN];
 
-        RAND_bytes(salt, SALT_LEN);
-        RAND_bytes(iv,   IV_LEN);
+        // FIX (Low): check RAND_bytes return value — failure means the entropy
+        // pool is not ready and the salt/IV would be uninitialised stack bytes.
+        if (RAND_bytes(salt, SALT_LEN) != 1) handleErrors();
+        if (RAND_bytes(iv,   IV_LEN)   != 1) handleErrors();
         deriveKey(password, salt, key);
 
-        CtxGuard g;                                 // FIX (Medium): RAII ctx
+        CtxGuard g;
         EVP_CIPHER_CTX* ctx = g.ctx;
         int len, ciphertext_len;
         vector<unsigned char> ciphertext(plaintext_sk.length() + EVP_MAX_BLOCK_LENGTH);
@@ -84,7 +93,6 @@ public:
         ciphertext_len += len;
 
         EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, TAG_LEN, (void*)tag);
-        // ctx freed automatically by CtxGuard
 
         string out(reinterpret_cast<char*>(salt),              SALT_LEN);
         out.append(reinterpret_cast<char*>(iv),                IV_LEN);
@@ -97,14 +105,12 @@ public:
     static string decryptSK(const string& packaged_data, const string& password)
     {
         if (packaged_data.length() < (size_t)(SALT_LEN + IV_LEN + TAG_LEN))
-        {
             return "";
-        }
 
         unsigned char salt[SALT_LEN], iv[IV_LEN], tag[TAG_LEN], key[KEY_LEN];
-        memcpy(salt, packaged_data.data(),                      SALT_LEN);
-        memcpy(iv,   packaged_data.data() + SALT_LEN,           IV_LEN);
-        memcpy(tag,  packaged_data.data() + SALT_LEN + IV_LEN,  TAG_LEN);
+        memcpy(salt, packaged_data.data(),                     SALT_LEN);
+        memcpy(iv,   packaged_data.data() + SALT_LEN,          IV_LEN);
+        memcpy(tag,  packaged_data.data() + SALT_LEN + IV_LEN, TAG_LEN);
 
         deriveKey(password, salt, key);
 
@@ -112,7 +118,7 @@ public:
             (const unsigned char*)(packaged_data.data() + SALT_LEN + IV_LEN + TAG_LEN);
         int ciphertext_len = (int)(packaged_data.length() - (SALT_LEN + IV_LEN + TAG_LEN));
 
-        CtxGuard g;                                 // FIX (Medium): RAII ctx
+        CtxGuard g;
         EVP_CIPHER_CTX* ctx = g.ctx;
         int len, plaintext_len;
         vector<unsigned char> plaintext(ciphertext_len);
@@ -122,23 +128,17 @@ public:
         EVP_DecryptUpdate(ctx, plaintext.data(), &len, ciphertext, ciphertext_len);
         plaintext_len = len;
 
-        // FIX (High): cast tag to (void*) as required by OpenSSL's API contract.
-        // Without it the behaviour is undefined; some builds silently skip tag
-        // verification, defeating AES-GCM's authentication guarantee entirely.
+        // (void*) cast is required by OpenSSL's API contract for SET_TAG.
         EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, TAG_LEN, (void*)tag);
 
         int ret = EVP_DecryptFinal_ex(ctx, plaintext.data() + len, &len);
-        // ctx freed automatically by CtxGuard
 
         if (ret > 0)
         {
             plaintext_len += len;
             return string(reinterpret_cast<char*>(plaintext.data()), plaintext_len);
         }
-        else
-        {
-            return "";
-        }
+        return "";
     }
 };
 
@@ -151,9 +151,8 @@ private:
     {
         ifstream fs(PARAMS_FILE, ios::binary);
         if (!fs.is_open())
-        {
             throw runtime_error("[-] Error: Run setup first.");
-        }
+
         EncryptionParameters parms;
         parms.load(fs);
         context_ = make_shared<SEALContext>(parms);
@@ -163,21 +162,23 @@ private:
     {
         ifstream fs_sk(SK_ENC_FILE, ios::binary | ios::ate);
         if (!fs_sk.is_open())
-        {
             throw runtime_error("[-] Error: Vault does not exist. Run Setup first.");
-        }
 
         streamsize size = fs_sk.tellg();
-        fs_sk.seekg(0, ios::beg);
 
+        // FIX (Low): tellg() returns -1 on error; casting to size_t wraps it
+        // to a huge value, causing bad_alloc or memory corruption.
+        if (size <= 0)
+            throw runtime_error("[-] Error: Could not read secret key file.");
+
+        fs_sk.seekg(0, ios::beg);
         string enc_sk_data(size, '\0');
         fs_sk.read(&enc_sk_data[0], size);
 
         string raw_sk = CryptoManager::decryptSK(enc_sk_data, password);
         if (raw_sk.empty())
-        {
             throw runtime_error("[-] Error: Incorrect password.");
-        }
+
         return raw_sk;
     }
 
@@ -189,6 +190,10 @@ private:
         SecretKey secret_key;
         secret_key.load(*context_, sk_ss);
 
+        // FIX (Medium): securely erase raw_sk now that the SecretKey object
+        // holds its own copy.  The string would otherwise linger on the heap.
+        secureErase(raw_sk);
+
         Decryptor    decryptor(*context_, secret_key);
         BatchEncoder batch_encoder(*context_);
 
@@ -196,9 +201,7 @@ private:
         map<string, string> decrypted_accounts;
 
         if (!fs_data.is_open())
-        {
             return decrypted_accounts;
-        }
 
         while (fs_data.peek() != EOF)
         {
@@ -237,13 +240,13 @@ private:
 
     void rewriteVault(const map<string, string>& accounts)
     {
-        ofstream fs_data(DATA_FILE, ios::binary | ios::trunc);
-        fs_data.close();
+        // Truncate first.
+        {
+            ofstream fs_data(DATA_FILE, ios::binary | ios::trunc);
+        }
 
         if (accounts.empty())
-        {
             return;
-        }
 
         ifstream fs_pk(PK_FILE, ios::binary);
         PublicKey public_key;
@@ -253,22 +256,24 @@ private:
         BatchEncoder batch_encoder(*context_);
         size_t       slot_count = batch_encoder.slot_count();
 
-        fs_data.open(DATA_FILE, ios::binary | ios::app);
+        ofstream fs_data(DATA_FILE, ios::binary | ios::app);
+
+        // FIX (High): check that the file was successfully reopened.  Without
+        // this, if the open fails after the truncation above, all account data
+        // is silently lost — the file is empty and nothing was written.
+        if (!fs_data.is_open())
+            throw runtime_error("[-] Fatal: could not reopen vault data file for writing.");
 
         for (const auto& pair : accounts)
         {
             string formatted_data = pair.first + "|" + pair.second;
 
             if (formatted_data.length() > slot_count)
-            {
                 throw runtime_error("[-] Error: Payload exceeds max vault slot size.");
-            }
 
             vector<uint64_t> pod_matrix(slot_count, 0ULL);
             for (size_t i = 0; i < formatted_data.length() && i < slot_count; ++i)
-            {
                 pod_matrix[i] = static_cast<uint64_t>(formatted_data[i]);
-            }
 
             Plaintext plain_data;
             batch_encoder.encode(pod_matrix, plain_data);
@@ -280,12 +285,27 @@ private:
         }
     }
 
-public:
-
-    void verifyPassword(const string& password)
+    // Shared input validation for both account names and credentials.
+    // Returns false and prints a message if the value is unsafe to store.
+    static bool validateField(const string& value, const string& field_name)
     {
-        getRawSecretKey(password);
+        if (value.find('|') != string::npos)
+        {
+            cout << "[-] Error: " << field_name << " cannot contain the '|' character.\n";
+            return false;
+        }
+        for (char c : value)
+        {
+            if (c == '\0')
+            {
+                cout << "[-] Error: " << field_name << " cannot contain null bytes.\n";
+                return false;
+            }
+        }
+        return true;
     }
+
+public:
 
     void setup(const string& password)
     {
@@ -297,8 +317,7 @@ public:
 
         context_ = make_shared<SEALContext>(parms);
 
-        ofstream fs_data(DATA_FILE, ios::binary | ios::trunc);
-        fs_data.close();
+        { ofstream fs_data(DATA_FILE, ios::binary | ios::trunc); }
 
         ofstream fs_params(PARAMS_FILE, ios::binary);
         parms.save(fs_params);
@@ -314,8 +333,8 @@ public:
         stringstream sk_ss;
         secret_key.save(sk_ss);
 
-        string    enc_sk = CryptoManager::encryptSK(sk_ss.str(), password);
-        ofstream  fs_sk(SK_ENC_FILE, ios::binary);
+        string   enc_sk = CryptoManager::encryptSK(sk_ss.str(), password);
+        ofstream fs_sk(SK_ENC_FILE, ios::binary);
         fs_sk.write(enc_sk.data(), enc_sk.length());
 
         cout << "[+] Setup complete. Vault reset and new keys generated.\n";
@@ -325,34 +344,11 @@ public:
     {
         loadContext();
 
-        if (account_name.find('|') != string::npos)
-        {
-            cout << "[-] Error: Account names cannot contain the '|' character.\n";
-            return;
-        }
+        // FIX (High): validate both fields — account_name null bytes cause
+        // unparseable records; credentials were already guarded in v1.
+        if (!validateField(account_name, "Account names"))   return;
+        if (!validateField(credentials,  "Credentials"))     return;
 
-        // FIX (High): validate credentials for the delimiter character.
-        // Without this, storing "user:pass|extra" causes the parser to split
-        // on the second '|', silently corrupting the retrieved value.
-        if (credentials.find('|') != string::npos)
-        {
-            cout << "[-] Error: Credentials cannot contain the '|' character.\n";
-            return;
-        }
-
-        // FIX (Low): reject null bytes — the BFV decode loop treats val==0 as
-        // end-of-string, so null bytes in credentials would cause silent truncation.
-        for (char c : credentials)
-        {
-            if (c == '\0')
-            {
-                cout << "[-] Error: Credentials cannot contain null bytes.\n";
-                return;
-            }
-        }
-
-        // FIX (Medium): load accounts once and reuse the map for both the
-        // existence check and the update path, avoiding a second full decrypt.
         map<string, string> accounts = loadAllAccounts(password);
 
         if (accounts.find(account_name) != accounts.end())
@@ -375,22 +371,17 @@ public:
             return;
         }
 
-        // Account is new — append a single encrypted entry directly.
         string formatted_data = account_name + "|" + credentials;
 
         BatchEncoder batch_encoder(*context_);
         size_t       slot_count = batch_encoder.slot_count();
 
         if (formatted_data.length() > slot_count)
-        {
             throw runtime_error("[-] Error: Payload exceeds max vault slot size.");
-        }
 
         vector<uint64_t> pod_matrix(slot_count, 0ULL);
         for (size_t i = 0; i < formatted_data.length() && i < slot_count; ++i)
-        {
             pod_matrix[i] = static_cast<uint64_t>(formatted_data[i]);
-        }
 
         Plaintext plain_data;
         batch_encoder.encode(pod_matrix, plain_data);
@@ -422,9 +413,7 @@ public:
 
         cout << "\n--- Available Accounts ---\n";
         for (const auto& pair : decrypted_accounts)
-        {
             cout << "- " << pair.first << "\n";
-        }
         cout << "--------------------------\n";
 
         cout << "Enter the name of the account to retrieve its credentials: ";
@@ -435,6 +424,13 @@ public:
         if (it != decrypted_accounts.end())
         {
             cout << "\n[+] Credentials for '" << target_account << "': " << it->second << "\n";
+
+            // FIX (Medium): credentials printed in plaintext persist on-screen
+            // indefinitely.  Prompt the user to dismiss, then erase the lines.
+            cout << "Press Enter to clear credentials from screen...";
+            cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            // Move up two lines and erase them (works on ANSI-compatible terminals).
+            cout << "\033[1A\033[2K\033[1A\033[2K" << flush;
         }
         else
         {
@@ -455,9 +451,7 @@ public:
 
         cout << "\n--- Available Accounts ---\n";
         for (const auto& pair : accounts)
-        {
             cout << "- " << pair.first << "\n";
-        }
         cout << "--------------------------\n";
 
         cout << "Enter account name to update: ";
@@ -474,11 +468,8 @@ public:
         string new_credentials;
         getline(cin, new_credentials);
 
-        if (new_credentials.find('|') != string::npos)
-        {
-            cout << "[-] Error: Credentials cannot contain the '|' character.\n";
+        if (!validateField(new_credentials, "Credentials"))
             return;
-        }
 
         accounts[account_name] = new_credentials;
         rewriteVault(accounts);
@@ -499,9 +490,7 @@ public:
 
         cout << "\n--- Available Accounts ---\n";
         for (const auto& pair : accounts)
-        {
             cout << "- " << pair.first << "\n";
-        }
         cout << "--------------------------\n";
 
         cout << "Enter account name to delete: ";
@@ -522,9 +511,12 @@ public:
 
     void changePassword(const string& old_pw, const string& new_pw)
     {
+        // loadContext() is not required here — we only touch the SK file.
         string raw_sk = getRawSecretKey(old_pw);
 
         string   new_enc_sk = CryptoManager::encryptSK(raw_sk, new_pw);
+        secureErase(raw_sk);   // FIX (Medium): erase SK bytes before leaving scope
+
         ofstream out_sk(SK_ENC_FILE, ios::binary | ios::trunc);
         out_sk.write(new_enc_sk.data(), new_enc_sk.length());
 
@@ -562,8 +554,6 @@ int main()
 
         if (choice == 1)
         {
-            // FIX (High): require explicit confirmation before erasing the vault.
-            // Previously, any accidental keypress would silently destroy all data.
             cout << "WARNING: This will permanently erase all stored accounts and regenerate keys.\n";
             cout << "Type YES to confirm: ";
             string confirm;
@@ -577,24 +567,35 @@ int main()
             string pw;
             cout << "Enter new master password: ";
             getline(cin, pw);
+
+            // FIX (Medium): reject empty passwords — an empty passphrase
+            // produces a fully deterministic encryption key.
+            if (pw.empty())
+            {
+                cout << "[-] Error: Master password cannot be empty.\n";
+                continue;
+            }
+
             vault.setup(pw);
         }
         else if (choice == 2)
         {
+            // FIX (High): removed the outer verifyPassword() call.
+            // store() calls loadAllAccounts() → getRawSecretKey() internally,
+            // which already validates the password through AES-GCM tag
+            // verification.  The outer call doubled the PBKDF2 work needlessly.
             string account_name, credentials, master_pw;
             cout << "Enter master password: ";
             getline(cin, master_pw);
 
+            cout << "Enter account name: ";
+            getline(cin, account_name);
+
+            cout << "Enter credentials to store: ";
+            getline(cin, credentials);
+
             try
             {
-                vault.verifyPassword(master_pw);
-
-                cout << "Enter account name: ";
-                getline(cin, account_name);
-
-                cout << "Enter credentials to store: ";
-                getline(cin, credentials);
-
                 vault.store(account_name, credentials, master_pw);
             }
             catch (exception& e)
@@ -608,46 +609,29 @@ int main()
             cout << "Enter master password: ";
             getline(cin, pw);
 
-            try
-            {
-                vault.retrieve(pw);
-            }
-            catch (exception& e)
-            {
-                cout << e.what() << "\n";
-            }
+            try { vault.retrieve(pw); }
+            catch (exception& e) { cout << e.what() << "\n"; }
         }
         else if (choice == 4)
         {
+            // FIX (High): removed redundant verifyPassword() — updateAccount()
+            // already validates through loadAllAccounts() → getRawSecretKey().
             string master_pw;
             cout << "Enter master password: ";
             getline(cin, master_pw);
 
-            try
-            {
-                vault.verifyPassword(master_pw);
-                vault.updateAccount(master_pw);
-            }
-            catch (exception& e)
-            {
-                cout << e.what() << "\n";
-            }
+            try { vault.updateAccount(master_pw); }
+            catch (exception& e) { cout << e.what() << "\n"; }
         }
         else if (choice == 5)
         {
+            // FIX (High): same — deleteAccount() validates internally.
             string master_pw;
             cout << "Enter master password: ";
             getline(cin, master_pw);
 
-            try
-            {
-                vault.verifyPassword(master_pw);
-                vault.deleteAccount(master_pw);
-            }
-            catch (exception& e)
-            {
-                cout << e.what() << "\n";
-            }
+            try { vault.deleteAccount(master_pw); }
+            catch (exception& e) { cout << e.what() << "\n"; }
         }
         else if (choice == 6)
         {
@@ -655,19 +639,18 @@ int main()
             cout << "Enter current password: ";
             getline(cin, old_pw);
 
-            try
-            {
-                vault.verifyPassword(old_pw);
+            cout << "Enter new password: ";
+            getline(cin, new_pw);
 
-                cout << "Enter new password: ";
-                getline(cin, new_pw);
-
-                vault.changePassword(old_pw, new_pw);
-            }
-            catch (exception& e)
+            // FIX (Medium): reject empty new password.
+            if (new_pw.empty())
             {
-                cout << e.what() << "\n";
+                cout << "[-] Error: New password cannot be empty.\n";
+                continue;
             }
+
+            try { vault.changePassword(old_pw, new_pw); }
+            catch (exception& e) { cout << e.what() << "\n"; }
         }
         else if (choice == 7)
         {
