@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <filesystem>
 
 // Crypto headers
 #include <seal/seal.h>
@@ -28,6 +29,13 @@ const int TAG_LEN       = 16;
 const int KEY_LEN       = 32;
 const int PBKDF2_ITERS  = 100000;
 
+// Maximum bytes accepted from any single getline() call.
+// Prevents unbounded heap growth from malicious/accidental input.
+const size_t MAX_INPUT_LEN = 1024;
+
+// Temporary file used by rewriteVault() for atomic replacement.
+const string TEMP_DATA_FILE = "data_store.bin.tmp";
+
 // RAII wrapper so EVP_CIPHER_CTX is always freed, even if an exception
 // propagates out of the crypto functions.
 struct CtxGuard
@@ -46,6 +54,21 @@ static void secureErase(string& s)
 {
     if (!s.empty())
         OPENSSL_cleanse(&s[0], s.size());
+}
+
+// Read one line from stdin, capped at MAX_INPUT_LEN bytes.
+// Returns false if the input exceeded the limit (line is cleared).
+static bool safeGetline(string& out)
+{
+    if (!getline(cin, out))
+        return false;
+    if (out.length() > MAX_INPUT_LEN)
+    {
+        cout << "[-] Error: Input exceeds maximum allowed length (" << MAX_INPUT_LEN << " bytes).\n";
+        out.clear();
+        return false;
+    }
+    return true;
 }
 
 class CryptoManager
@@ -190,9 +213,14 @@ private:
         SecretKey secret_key;
         secret_key.load(*context_, sk_ss);
 
-        // FIX (Medium): securely erase raw_sk now that the SecretKey object
-        // holds its own copy.  The string would otherwise linger on the heap.
+        // Securely erase raw_sk now that SecretKey holds its own copy.
         secureErase(raw_sk);
+
+        // Also zero the stringstream's internal buffer — it holds a copy of the
+        // secret key bytes that secureErase(raw_sk) above does not reach.
+        string sk_ss_buf = sk_ss.str();
+        secureErase(sk_ss_buf);
+        sk_ss.str(sk_ss_buf);   // replace buffer content with zeroed bytes
 
         Decryptor    decryptor(*context_, secret_key);
         BatchEncoder batch_encoder(*context_);
@@ -240,29 +268,40 @@ private:
 
     void rewriteVault(const map<string, string>& accounts)
     {
-        // Truncate first.
-        {
-            ofstream fs_data(DATA_FILE, ios::binary | ios::trunc);
-        }
+        // Write to a temporary file first, then atomically rename it over the
+        // real data file.  This eliminates the crash window that existed when
+        // the old code truncated the file and then re-opened it for writing:
+        // any failure between those two steps left the vault permanently empty.
+        // rename(2) is atomic on POSIX filesystems, so readers either see the
+        // complete old file or the complete new file — never a partial write.
 
         if (accounts.empty())
+        {
+            // Nothing to write: replace with an empty file atomically.
+            {
+                ofstream tmp(TEMP_DATA_FILE, ios::binary | ios::trunc);
+                if (!tmp.is_open())
+                    throw runtime_error("[-] Fatal: could not create temp vault file.");
+            }
+            filesystem::rename(TEMP_DATA_FILE, DATA_FILE);
             return;
+        }
 
         ifstream fs_pk(PK_FILE, ios::binary);
+        if (!fs_pk.is_open())
+            throw runtime_error("[-] Fatal: could not open public key file.");
+
         PublicKey public_key;
         public_key.load(*context_, fs_pk);
+        fs_pk.close();
 
         Encryptor    encryptor(*context_, public_key);
         BatchEncoder batch_encoder(*context_);
         size_t       slot_count = batch_encoder.slot_count();
 
-        ofstream fs_data(DATA_FILE, ios::binary | ios::app);
-
-        // FIX (High): check that the file was successfully reopened.  Without
-        // this, if the open fails after the truncation above, all account data
-        // is silently lost — the file is empty and nothing was written.
-        if (!fs_data.is_open())
-            throw runtime_error("[-] Fatal: could not reopen vault data file for writing.");
+        ofstream tmp(TEMP_DATA_FILE, ios::binary | ios::trunc);
+        if (!tmp.is_open())
+            throw runtime_error("[-] Fatal: could not create temp vault file.");
 
         for (const auto& pair : accounts)
         {
@@ -281,14 +320,32 @@ private:
             Ciphertext encrypted_data;
             encryptor.encrypt(plain_data, encrypted_data);
 
-            encrypted_data.save(fs_data);
+            encrypted_data.save(tmp);
         }
+
+        tmp.close();
+
+        // Atomic swap: if this throws, the original DATA_FILE is untouched.
+        error_code ec;
+        filesystem::rename(TEMP_DATA_FILE, DATA_FILE, ec);
+        if (ec)
+            throw runtime_error("[-] Fatal: could not atomically replace vault file: " + ec.message());
     }
 
-    // Shared input validation for both account names and credentials.
+    // Shared input validation for account names and credentials.
     // Returns false and prints a message if the value is unsafe to store.
     static bool validateField(const string& value, const string& field_name)
     {
+        if (value.empty())
+        {
+            cout << "[-] Error: " << field_name << " cannot be empty.\n";
+            return false;
+        }
+        if (value.length() > MAX_INPUT_LEN)
+        {
+            cout << "[-] Error: " << field_name << " exceeds maximum length.\n";
+            return false;
+        }
         if (value.find('|') != string::npos)
         {
             cout << "[-] Error: " << field_name << " cannot contain the '|' character.\n";
@@ -317,10 +374,15 @@ public:
 
         context_ = make_shared<SEALContext>(parms);
 
-        { ofstream fs_data(DATA_FILE, ios::binary | ios::trunc); }
+        // Create/truncate data file atomically via the temp path.
+        {
+            ofstream tmp(TEMP_DATA_FILE, ios::binary | ios::trunc);
+        }
+        filesystem::rename(TEMP_DATA_FILE, DATA_FILE);
 
         ofstream fs_params(PARAMS_FILE, ios::binary);
         parms.save(fs_params);
+        fs_params.close();
 
         KeyGenerator keygen(*context_);
         SecretKey    secret_key = keygen.secret_key();
@@ -329,13 +391,19 @@ public:
 
         ofstream fs_pk(PK_FILE, ios::binary);
         public_key.save(fs_pk);
+        fs_pk.close();
 
+        // Serialize SK to a stringstream, encrypt it, then zero the buffer.
         stringstream sk_ss;
         secret_key.save(sk_ss);
 
-        string   enc_sk = CryptoManager::encryptSK(sk_ss.str(), password);
+        string sk_plain = sk_ss.str();
+        string enc_sk   = CryptoManager::encryptSK(sk_plain, password);
+        secureErase(sk_plain);
+
         ofstream fs_sk(SK_ENC_FILE, ios::binary);
         fs_sk.write(enc_sk.data(), enc_sk.length());
+        fs_sk.close();
 
         cout << "[+] Setup complete. Vault reset and new keys generated.\n";
     }
@@ -557,100 +625,146 @@ int main()
             cout << "WARNING: This will permanently erase all stored accounts and regenerate keys.\n";
             cout << "Type YES to confirm: ";
             string confirm;
-            getline(cin, confirm);
-            if (confirm != "YES")
+            if (!safeGetline(confirm) || confirm != "YES")
             {
                 cout << "[-] Reset cancelled.\n";
                 continue;
             }
 
-            string pw;
-            cout << "Enter new master password: ";
-            getline(cin, pw);
+            // FIX: password confirmation loop — a typo on setup locks the vault
+            // permanently since there is no recovery path without the password.
+            string pw, pw_confirm;
+            do {
+                cout << "Enter new master password: ";
+                if (!safeGetline(pw)) { pw.clear(); break; }
 
-            // FIX (Medium): reject empty passwords — an empty passphrase
-            // produces a fully deterministic encryption key.
+                if (pw.empty())
+                {
+                    cout << "[-] Error: Master password cannot be empty.\n";
+                    continue;
+                }
+
+                cout << "Confirm master password: ";
+                if (!safeGetline(pw_confirm)) { pw.clear(); break; }
+
+                if (pw != pw_confirm)
+                {
+                    cout << "[-] Passwords do not match. Try again.\n";
+                    secureErase(pw);
+                    secureErase(pw_confirm);
+                }
+            } while (pw != pw_confirm || pw.empty());
+
+            secureErase(pw_confirm);
+
             if (pw.empty())
             {
-                cout << "[-] Error: Master password cannot be empty.\n";
+                cout << "[-] Setup cancelled.\n";
                 continue;
             }
 
-            vault.setup(pw);
+            try { vault.setup(pw); }
+            catch (exception& e) { cout << e.what() << "\n"; }
+
+            secureErase(pw);
         }
         else if (choice == 2)
         {
-            // FIX (High): removed the outer verifyPassword() call.
-            // store() calls loadAllAccounts() → getRawSecretKey() internally,
-            // which already validates the password through AES-GCM tag
-            // verification.  The outer call doubled the PBKDF2 work needlessly.
             string account_name, credentials, master_pw;
+
             cout << "Enter master password: ";
-            getline(cin, master_pw);
+            if (!safeGetline(master_pw)) continue;
 
             cout << "Enter account name: ";
-            getline(cin, account_name);
+            if (!safeGetline(account_name)) { secureErase(master_pw); continue; }
 
             cout << "Enter credentials to store: ";
-            getline(cin, credentials);
+            if (!safeGetline(credentials)) { secureErase(master_pw); secureErase(account_name); continue; }
 
-            try
-            {
-                vault.store(account_name, credentials, master_pw);
-            }
-            catch (exception& e)
-            {
-                cout << e.what() << "\n";
-            }
+            try { vault.store(account_name, credentials, master_pw); }
+            catch (exception& e) { cout << e.what() << "\n"; }
+
+            // Securely erase all sensitive strings once the operation completes.
+            secureErase(master_pw);
+            secureErase(credentials);
+            secureErase(account_name);
         }
         else if (choice == 3)
         {
             string pw;
             cout << "Enter master password: ";
-            getline(cin, pw);
+            if (!safeGetline(pw)) continue;
 
             try { vault.retrieve(pw); }
             catch (exception& e) { cout << e.what() << "\n"; }
+
+            secureErase(pw);
         }
         else if (choice == 4)
         {
-            // FIX (High): removed redundant verifyPassword() — updateAccount()
-            // already validates through loadAllAccounts() → getRawSecretKey().
             string master_pw;
             cout << "Enter master password: ";
-            getline(cin, master_pw);
+            if (!safeGetline(master_pw)) continue;
 
             try { vault.updateAccount(master_pw); }
             catch (exception& e) { cout << e.what() << "\n"; }
+
+            secureErase(master_pw);
         }
         else if (choice == 5)
         {
-            // FIX (High): same — deleteAccount() validates internally.
             string master_pw;
             cout << "Enter master password: ";
-            getline(cin, master_pw);
+            if (!safeGetline(master_pw)) continue;
 
             try { vault.deleteAccount(master_pw); }
             catch (exception& e) { cout << e.what() << "\n"; }
+
+            secureErase(master_pw);
         }
         else if (choice == 6)
         {
-            string old_pw, new_pw;
+            string old_pw, new_pw, new_pw_confirm;
+
             cout << "Enter current password: ";
-            getline(cin, old_pw);
+            if (!safeGetline(old_pw)) continue;
 
-            cout << "Enter new password: ";
-            getline(cin, new_pw);
+            // Confirmation loop for the new password, matching setup behaviour.
+            do {
+                cout << "Enter new password: ";
+                if (!safeGetline(new_pw)) { new_pw.clear(); break; }
 
-            // FIX (Medium): reject empty new password.
-            if (new_pw.empty())
+                if (new_pw.empty())
+                {
+                    cout << "[-] Error: New password cannot be empty.\n";
+                    continue;
+                }
+
+                cout << "Confirm new password: ";
+                if (!safeGetline(new_pw_confirm)) { new_pw.clear(); break; }
+
+                if (new_pw != new_pw_confirm)
+                {
+                    cout << "[-] Passwords do not match. Try again.\n";
+                    secureErase(new_pw);
+                    secureErase(new_pw_confirm);
+                }
+            } while (new_pw != new_pw_confirm || new_pw.empty());
+
+            secureErase(new_pw_confirm);
+
+            if (!new_pw.empty())
             {
-                cout << "[-] Error: New password cannot be empty.\n";
-                continue;
+                try { vault.changePassword(old_pw, new_pw); }
+                catch (exception& e) { cout << e.what() << "\n"; }
+            }
+            else
+            {
+                cout << "[-] Password change cancelled.\n";
             }
 
-            try { vault.changePassword(old_pw, new_pw); }
-            catch (exception& e) { cout << e.what() << "\n"; }
+            secureErase(old_pw);
+            secureErase(new_pw);
         }
         else if (choice == 7)
         {
