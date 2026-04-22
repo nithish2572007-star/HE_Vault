@@ -625,7 +625,7 @@ int main()
             cout << "WARNING: This will permanently erase all stored accounts and regenerate keys.\n";
             cout << "Type YES to confirm: ";
             string confirm;
-            if (!safeGetline(confirm) || confirm != "YES")
+            if (!safeGetline(confirm) || confirm != "YES" && confirm != "yes")
             {
                 cout << "[-] Reset cancelled.\n";
                 continue;
