@@ -31,7 +31,17 @@ he_vault: \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/libgcc.a \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/libgcc.a \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/crtendS.o \
-  /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/crtn.o
+  /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/crtn.o \
+  /usr/lib32/libz.so.1 \
+  /usr/lib/libz.so.1 \
+  /usr/lib32/libbrotlienc.so.1 \
+  /usr/lib/libbrotlienc.so.1 \
+  /usr/lib32/libbrotlidec.so.1 \
+  /usr/lib/libbrotlidec.so.1 \
+  /usr/lib32/libzstd.so.1 \
+  /usr/lib/libzstd.so.1 \
+  /usr/lib32/libbrotlicommon.so.1 \
+  /usr/lib/libbrotlicommon.so.1
 
 /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/Scrt1.o:
 
@@ -98,3 +108,23 @@ CMakeFiles/he_vault.dir/main.cpp.o:
 /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/crtendS.o:
 
 /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/crtn.o:
+
+/usr/lib32/libz.so.1:
+
+/usr/lib/libz.so.1:
+
+/usr/lib32/libbrotlienc.so.1:
+
+/usr/lib/libbrotlienc.so.1:
+
+/usr/lib32/libbrotlidec.so.1:
+
+/usr/lib/libbrotlidec.so.1:
+
+/usr/lib32/libzstd.so.1:
+
+/usr/lib/libzstd.so.1:
+
+/usr/lib32/libbrotlicommon.so.1:
+
+/usr/lib/libbrotlicommon.so.1:
