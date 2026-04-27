@@ -553,12 +553,22 @@ he_vault: /usr/lib/Scrt1.o \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/crtendS.o \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/libgcc.a \
   /usr/lib/ld-linux-x86-64.so.2 \
+  /usr/lib/libbrotlicommon.so.1 \
+  /usr/lib/libbrotlidec.so.1 \
+  /usr/lib/libbrotlienc.so.1 \
   /usr/lib/libc.so.6 \
   /usr/lib/libc_nonshared.a \
   /usr/lib/libcrypto.so \
   /usr/lib/libm.so.6 \
   /usr/lib/libmvec.so.1 \
   /usr/lib/libssl.so \
+  /usr/lib/libz.so.1 \
+  /usr/lib/libzstd.so.1 \
+  /usr/lib32/libbrotlicommon.so.1 \
+  /usr/lib32/libbrotlidec.so.1 \
+  /usr/lib32/libbrotlienc.so.1 \
+  /usr/lib32/libz.so.1 \
+  /usr/lib32/libzstd.so.1 \
   /usr/local/lib/libseal-4.1.a \
   CMakeFiles/he_vault.dir/main.cpp.o
 
@@ -567,11 +577,25 @@ CMakeFiles/he_vault.dir/main.cpp.o:
 
 /usr/local/lib/libseal-4.1.a:
 
+/usr/lib32/libzstd.so.1:
+
+/usr/lib32/libz.so.1:
+
+/usr/lib32/libbrotlienc.so.1:
+
+/usr/lib32/libbrotlicommon.so.1:
+
 /usr/lib/libm.so.6:
 
 /usr/lib/libcrypto.so:
 
 /usr/lib/libc_nonshared.a:
+
+/usr/lib/libbrotlienc.so.1:
+
+/usr/lib/libbrotlidec.so.1:
+
+/usr/lib/libbrotlicommon.so.1:
 
 /usr/lib/ld-linux-x86-64.so.2:
 
@@ -626,6 +650,8 @@ CMakeFiles/he_vault.dir/main.cpp.o:
 /usr/include/c++/15.2.1/ext/alloc_traits.h:
 
 /usr/include/c++/15.2.1/mutex:
+
+/usr/lib/libz.so.1:
 
 /usr/include/c++/15.2.1/bits/shared_ptr_base.h:
 
@@ -1395,9 +1421,13 @@ CMakeFiles/he_vault.dir/main.cpp.o:
 
 /usr/include/openssl/stack.h:
 
+/usr/lib32/libbrotlidec.so.1:
+
 /usr/include/stdlib.h:
 
 /usr/include/string.h:
+
+/usr/lib/libzstd.so.1:
 
 /usr/include/sys/cdefs.h:
 
